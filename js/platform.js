@@ -24,7 +24,12 @@
       dpr: function () {
         return Math.min(window.devicePixelRatio || 1, 3);
       },
+      // 以画布容器的尺寸为准（容器可能因安全区留白而小于窗口）
       getSize: function () {
+        var box = canvas.parentElement;
+        if (box && box !== document.body && box.clientWidth > 0 && box.clientHeight > 0) {
+          return { w: box.clientWidth, h: box.clientHeight };
+        }
         return { w: window.innerWidth, h: window.innerHeight };
       },
       applySize: function (w, h, dpr) {
@@ -35,6 +40,7 @@
       },
       onResize: function (cb) {
         window.addEventListener('resize', cb);
+        if (window.ResizeObserver && canvas.parentElement) new window.ResizeObserver(cb).observe(canvas.parentElement);
       },
       onPointer: function (down, move, up) {
         canvas.addEventListener('pointerdown', function (e) {
@@ -85,7 +91,7 @@
         }
       },
       font: '"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Noto Sans SC",sans-serif',
-      titleFont: '"STKaiti","KaiTi","Kaiti SC","Noto Serif CJK SC","Noto Serif SC","Songti SC",serif'
+      titleFont: '"Ma Shan Zheng","STKaiti","KaiTi","Kaiti SC","Noto Serif CJK SC","Noto Serif SC","Songti SC",serif'
     };
   };
 
