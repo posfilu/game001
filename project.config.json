@@ -1,0 +1,21 @@
+{
+  "description": "狱国争霸 —— 抖音小游戏项目配置。用抖音开发者工具导入本目录，把 appid 换成你自己的小游戏 AppID。",
+  "compileType": "game",
+  "projectname": "yuguo-zhengba",
+  "appid": "YOUR_DOUYIN_APPID",
+  "setting": {
+    "es6": true,
+    "urlCheck": false,
+    "minified": true
+  },
+  "packOptions": {
+    "ignore": [
+      { "type": "folder", "value": "tests" },
+      { "type": "folder", "value": "tools" },
+      { "type": "folder", "value": "docs" },
+      { "type": "file", "value": "index.html" },
+      { "type": "file", "value": "package.json" },
+      { "type": "file", "value": "README.md" }
+    ]
+  }
+}

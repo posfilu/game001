@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0d080c">
+  <title>狱国争霸</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d080c; overflow: hidden; }
+    canvas { display: block; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <script src="js/config.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/mapgen.js"></script>
+  <script src="js/world.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/scenes.js"></script>
+  <script src="js/platform.js"></script>
+  <script src="js/main.js"></script>
+  <script>
+    window.game = YG.boot(YG.createBrowserPlatform(document.getElementById('game')));
+  </script>
+</body>
+</html>
