@@ -166,9 +166,10 @@
 
   var HELP = [
     ['身份', '主公：身份公开，消灭所有反贼和内奸。\n忠臣：保护主公，消灭所有反贼和内奸。\n反贼：攻破主公的主城即可获胜。\n内奸：先除掉其他所有人，最后单挑主公。\n除主公外身份隐藏，阵亡时亮明身份。攻打主公会被标为「疑反」，攻打疑反者会被标为「疑忠」。'],
-    ['操作', '按住己方城池拖到目标城池出兵，途经的己方城池会一起出兵；也可以先点己方城池，再点目标。点击己方城池可以升级；点击主公的城池可以「进贡」示好（送兵入城，名声变为疑忠）。点击锦囊使用，右下角切换出兵比例。'],
-    ['城池', '都·主城：产兵快、城防高，被攻破即阵亡；开局免战 60 秒。\n戟·兵营：训练重戟兵，攻击力 ×1.5。\n骑·马场：训练骑兵，行军速度 ×1.7。\n塔·箭塔：自动射杀射程内的敌兵，城防 ×1.5。'],
-    ['奖惩', '击杀反贼：摸 2 张锦囊。主公误杀忠臣：弃置全部锦囊，全军兵力减半。阵亡者的其他城池沦为中立。拖到 6 分钟后阴兵暴动，城防逐渐崩坏。']
+    ['连线出兵', '城池之间有道路相连，只能攻打相邻的城池。从己方城池拖到相邻城池建立连线（也可以先点己方城池再点目标），部队会沿道路源源不断出兵，城里兵越多出兵越快；连到自己的城池就是输送兵力。在连线上划一下、再拖一次同一条线或点「断开连线」即可断线。每座城能同时连的线数随等级增加。'],
+    ['操作', '点击己方城池可以升级；点击相邻的主公城池可以「进贡」示好（送兵入城，名声变为疑忠）。点击锦囊使用。'],
+    ['城池', '都·主城：产兵快、城防高，被攻破即阵亡；开局免战 60 秒；连线出兵时至少留守三成兵力。\n戟·兵营：训练重戟兵，攻击力 ×1.5。\n骑·马场：训练骑兵，行军速度 ×1.7。\n塔·箭塔：自动射杀射程内的敌兵，城防 ×1.5。'],
+    ['奖惩', '击杀反贼：摸 2 张锦囊。主公误杀忠臣：弃置全部锦囊，全军兵力减半。阵亡者的其他城池沦为中立。拖到 6 分钟后阴兵暴动出兵加速，城防逐渐崩坏。']
   ];
 
   function HelpScene(app) {
@@ -208,7 +209,7 @@
   // ======================= 对局 =======================
 
   var STEP = 1 / 60;
-  var RATIOS = [0.5, 0.75, 1, 0.25];
+  var LINK_FAIL = { noroad: '没有道路相连，只能连相邻的城池', shield: '对方免战中，暂时无法进攻' };
 
   function GameScene(app, opts) {
     this.app = app;
@@ -236,7 +237,8 @@
     this.t = 0;
     this.acc = 0;
     this.speed = 1;
-    this.ratioIdx = 0;
+    this.cut = null;
+    this.trail = [];
     this.overlay = 'reveal';
     this.deadShown = false;
     this.overTimer = -1;
@@ -256,7 +258,13 @@
     this.cardRects = [];
     for (var i = 0; i < YG.HAND_MAX_REWARD; i++) this.cardRects.push({ x: 16 + i * 106, y: y0 + 72, w: 96, h: 132 });
     var self = this;
-    this.ratioBtn = { x: 450, y: y0 + 72, w: 254, h: 64, size: 24, act: function () { self.ratioIdx = (self.ratioIdx + 1) % RATIOS.length; } };
+    this.cutAllBtn = {
+      x: 450, y: y0 + 72, w: 254, h: 64, size: 24,
+      act: function () {
+        var n = self.world.cutLinks(self.human);
+        self.toast(n ? '已断开 ' + n + ' 条连线' : '当前没有连线', T.gold);
+      }
+    };
     this.pauseBtn = { x: 450, y: y0 + 144, w: 122, h: 60, label: '暂停', size: 22, act: function () { self.overlay = 'pause'; } };
     this.speedBtn = { x: 582, y: y0 + 144, w: 122, h: 60, size: 22, act: function () { self.cycleSpeed(); } };
   };
@@ -267,8 +275,24 @@
     this.speed = opts[(i + 1) % opts.length];
   };
 
-  GameScene.prototype.ratio = function () {
-    return RATIOS[this.ratioIdx];
+  GameScene.prototype.toast = function (text, color) {
+    this.toasts.push({ text: text, color: color || T.gold, t: 0 });
+    if (this.toasts.length > 3) this.toasts.shift();
+  };
+
+  /** 从若干己方城池向目标连线；只有一座源城池时再次连同一条线会断开 */
+  GameScene.prototype.linkTo = function (sources, targetId) {
+    var w = this.world;
+    var fail = null;
+    var made = 0;
+    for (var i = 0; i < sources.length; i++) {
+      if (sources[i] === targetId) continue;
+      var res = sources.length === 1 ? w.toggleLink(this.human, sources[i], targetId) : w.link(this.human, sources[i], targetId);
+      if (res === 'linked' || res === 'unlinked' || res === 'exists') made++;
+      else if (LINK_FAIL[res]) fail = res;
+    }
+    if (!made && fail) this.toast(LINK_FAIL[fail], '#ff8a80');
+    return made;
   };
 
   // ---------- 更新 ----------
@@ -295,6 +319,10 @@
     if (this.selected != null && this.world.cities[this.selected].owner !== this.human && this.selectedOwn) this.selected = null;
     if (this.cardMode >= 0 && !this.me.hand[this.cardMode]) this.cardMode = -1;
 
+    for (var q = this.trail.length - 1; q >= 0; q--) {
+      this.trail[q].t += dt;
+      if (this.trail[q].t > 0.35) this.trail.splice(q, 1);
+    }
     for (var k = this.toasts.length - 1; k >= 0; k--) {
       this.toasts[k].t += dt;
       if (this.toasts[k].t > 2.8) this.toasts.splice(k, 1);
@@ -320,8 +348,7 @@
   GameScene.prototype.notice = function (n) {
     var w = this.world;
     if (n.kind === 'toast') {
-      this.toasts.push({ text: n.text, color: n.color, t: 0 });
-      if (this.toasts.length > 3) this.toasts.shift();
+      this.toast(n.text, n.color);
     } else if (n.kind === 'banner') {
       this.banners.push({ title: n.title, color: n.color, t: 0 });
     } else if (n.kind === 'eliminate') {
@@ -346,8 +373,9 @@
       for (var i = 0; i < list.length; i++) if (D.hit(list[i], x, y)) return list[i];
       return null;
     }
-    if (this.popupBtn && D.hit(this.popupBtn, x, y)) return this.popupBtn;
-    var btns = [this.ratioBtn, this.pauseBtn, this.speedBtn];
+    var pop = this.popupBtns || [];
+    for (var p = 0; p < pop.length; p++) if (D.hit(pop[p], x, y)) return pop[p];
+    var btns = [this.cutAllBtn, this.pauseBtn, this.speedBtn];
     for (var k = 0; k < btns.length; k++) if (D.hit(btns[k], x, y)) return btns[k];
     for (var c = 0; c < this.me.hand.length; c++) {
       if (D.hit(this.cardRects[c], x, y)) return { card: c };
@@ -369,24 +397,54 @@
       return;
     }
     if (c && c.owner === this.human) {
+      // 从己方城池拖出：连线
       this.drag = { start: c, sel: [c.id], sx: x, sy: y, moved: false };
     } else {
-      this.tapCity = c || 'none';
+      // 从别处拖动：划断连线；不拖动就是点击
+      this.cut = { tap: c || 'none', sx: x, sy: y, lx: x, ly: y, moved: false, count: 0 };
     }
   };
 
   GameScene.prototype.onMove = function (x, y) {
     this.pointer = { x: x, y: y };
+    if (this.cut) {
+      var ct = this.cut;
+      if (!ct.moved && YG.dist(x, y, ct.sx, ct.sy) > 12) ct.moved = true;
+      if (ct.moved) {
+        ct.count += this.cutAcross(ct.lx, ct.ly, x, y);
+        this.trail.push({ x: x, y: y, t: 0 });
+        ct.lx = x;
+        ct.ly = y;
+      }
+      return;
+    }
     if (!this.drag) return;
     if (!this.drag.moved && YG.dist(x, y, this.drag.sx, this.drag.sy) > 12) this.drag.moved = true;
     if (!this.drag.moved) return;
     var c = this.view.hitCity(x, y, 10);
     this.drag.hover = c ? c.id : null;
-    // 划过的己方城池一起出兵
+    // 划过的己方城池一起连线
     if (c && c.owner === this.human && this.drag.sel.indexOf(c.id) < 0) {
       var nearTarget = YG.dist(x, y, c.x, c.y) < this.view.cityRadius(c);
       if (nearTarget) this.drag.sel.push(c.id);
     }
+  };
+
+  /** 划过的己方连线全部断开，返回断开条数 */
+  GameScene.prototype.cutAcross = function (x1, y1, x2, y2) {
+    var w = this.world;
+    var n = 0;
+    var mine = w.links.filter(function (l) { return l.owner === this.human; }, this);
+    for (var i = 0; i < mine.length; i++) {
+      var a = w.cities[mine[i].from];
+      var b = w.cities[mine[i].to];
+      if (YG.segmentsCross(x1, y1, x2, y2, a.x, a.y, b.x, b.y)) {
+        w.removeLink(mine[i]);
+        this.view.float((x1 + x2) / 2, (y1 + y2) / 2 - 16, '断', '#ffffff');
+        n++;
+      }
+    }
+    return n;
   };
 
   GameScene.prototype.onUp = function (x, y) {
@@ -401,7 +459,11 @@
       }
       return;
     }
-    if (this.overlay || !this.me.alive || w.winner) return;
+    if (this.overlay || !this.me.alive || w.winner) {
+      this.drag = null;
+      this.cut = null;
+      return;
+    }
 
     if (this.cardMode >= 0) {
       var cc = this.view.hitCity(x, y);
@@ -417,36 +479,35 @@
       var d = this.drag;
       this.drag = null;
       if (!d.moved) {
-        // 点击：已选中己方城池时，再点另一座己方城池 → 调兵；否则切换选中
-        if (this.selected != null && this.selectedOwn && this.selected !== d.start.id) {
-          w.dispatch(this.human, [this.selected], d.start.id, this.ratio());
-          this.selected = null;
-        } else {
-          this.select(this.selected === d.start.id ? null : d.start.id);
-        }
+        this.tapOn(d.start);
         return;
       }
       var target = this.view.hitCity(x, y, 10);
-      if (!target) return;
-      var sources = d.sel.filter(function (id) { return id !== target.id; });
-      if (sources.length) w.dispatch(this.human, sources, target.id, this.ratio());
+      if (target) this.linkTo(d.sel, target.id);
       this.selected = null;
       return;
     }
 
-    if (this.tapCity) {
-      var tc = this.tapCity;
-      this.tapCity = null;
-      if (tc === 'none') {
-        this.select(null);
-      } else if (this.selected != null && this.selectedOwn) {
-        // 先点己方城池，再点目标 → 出兵
-        w.dispatch(this.human, [this.selected], tc.id, this.ratio());
-        this.selected = null;
-      } else {
-        this.select(this.selected === tc.id ? null : tc.id);
+    if (this.cut) {
+      var ct = this.cut;
+      this.cut = null;
+      if (ct.moved) {
+        if (ct.count) this.toast('断开了 ' + ct.count + ' 条连线', T.gold);
+        return;
       }
+      if (ct.tap === 'none') this.select(null);
+      else this.tapOn(ct.tap);
     }
+  };
+
+  /** 点击城池：已选中己方城池时再点相邻城池 → 连线 / 断线；否则切换选中 */
+  GameScene.prototype.tapOn = function (c) {
+    if (this.selected != null && this.selectedOwn && this.selected !== c.id && this.world.isAdjacent(this.selected, c.id)) {
+      this.linkTo([this.selected], c.id);
+      this.selected = null;
+      return;
+    }
+    this.select(this.selected === c.id ? null : c.id);
   };
 
   GameScene.prototype.select = function (id) {
@@ -482,11 +543,13 @@
       dragSel: this.drag && this.drag.moved ? this.drag.sel : null,
       hover: this.drag ? this.drag.hover : null,
       pointer: this.pointer,
+      trail: this.trail,
+      neighborsOf: this.drag ? this.drag.sel : this.selected != null && this.selectedOwn ? [this.selected] : null,
       cardTarget: this.cardMode >= 0 ? function (c) { return w.canTarget(self.human, self.me.hand[self.cardMode], c.id); } : null
     };
     this.view.draw(ctx, W, H, this.app.pixelScale, this.t, ui);
 
-    this.drawDragCount(ctx);
+    this.drawDragHint(ctx);
     this.drawPopup(ctx);
     this.drawTop(ctx);
     this.drawBottom(ctx);
@@ -502,32 +565,46 @@
     }
   };
 
-  GameScene.prototype.drawDragCount = function (ctx) {
+  GameScene.prototype.drawDragHint = function (ctx) {
     if (!this.drag || !this.drag.moved || !this.pointer) return;
     var w = this.world;
-    var n = 0;
-    var r = this.ratio();
     var hover = this.drag.hover;
-    for (var i = 0; i < this.drag.sel.length; i++) {
-      if (this.drag.sel[i] === hover) continue;
-      n += Math.floor(w.cities[this.drag.sel[i]].troops * r);
+    var text = '连线 ×' + this.drag.sel.length;
+    var color = this.me.color;
+    if (hover != null) {
+      var sources = this.drag.sel.filter(function (id) { return id !== hover; });
+      var linked = sources.filter(function (id) { return w.findLink(id, hover); }).length;
+      var ok = sources.filter(function (id) { return w.isAdjacent(id, hover); }).length;
+      if (sources.length === 0) text = '选择目标';
+      else if (sources.length === 1 && linked) {
+        text = '断开连线';
+        color = '#ffffff';
+      } else if (!ok) {
+        text = '没有道路';
+        color = '#ff6b6b';
+      } else {
+        text = w.cities[hover].owner === this.human ? '输送兵力' : '连线进攻';
+      }
     }
     var x = this.pointer.x;
     var y = this.pointer.y - 56;
-    D.panel(ctx, x - 40, y - 18, 80, 36, 18, 'rgba(0,0,0,0.7)', this.me.color, 2);
-    D.text(ctx, '⚔ ' + n, x, y + 1, 18, '#fff', 'center', 'bold');
+    ctx.font = D.font(17, 'bold');
+    var tw = ctx.measureText(text).width + 28;
+    D.panel(ctx, x - tw / 2, y - 18, tw, 36, 18, 'rgba(0,0,0,0.75)', color, 2);
+    D.text(ctx, text, x, y + 1, 17, '#fff', 'center', 'bold');
   };
 
   GameScene.prototype.drawPopup = function (ctx) {
-    this.popupBtn = null;
+    this.popupBtns = [];
     if (this.selected == null || this.overlay) return;
     var w = this.world;
+    var self = this;
     var c = w.cities[this.selected];
     var kind = YG.CITY_KIND[c.kind];
     var own = c.owner === this.human;
     var canTribute = !own && c.owner === w.lordId && this.human !== w.lordId && this.me.alive;
-    var pw = 280;
-    var ph = own || canTribute ? 150 : 104;
+    var pw = 300;
+    var ph = own ? 176 : canTribute ? 150 : 104;
     var r = this.view.cityRadius(c);
     var x = YG.clamp(c.x - pw / 2, 10, this.app.W - pw - 10);
     var y = c.y - r - ph - 34;
@@ -537,50 +614,54 @@
     D.text(ctx, c.name + ' · ' + kind.name + ' Lv' + c.level, x + 14, y + 22, 17, T.gold, 'left', 'bold');
     D.text(ctx, ownerName + '  兵 ' + Math.floor(c.troops) + '/' + w.cityCap(c) + '  产 ' + w.cityProd(c).toFixed(1) + '/秒', x + 14, y + 48, 14, T.text);
     D.text(ctx, kind.desc, x + 14, y + 72, 12, T.dim);
+    var btn;
     if (own) {
+      var links = w.linksFrom(c.id).length;
+      var guard = w.guard(c) ? ' · 留守 ' + Math.round(w.guard(c)) : '';
+      D.text(ctx, '连线 ' + links + '/' + w.maxLinks(c) + ' · 每条 ' + w.linkRate(c).toFixed(1) + ' 兵/秒' + guard + ' · 点相邻城池连线', x + 14, y + 96, 12, T.text);
       if (c.level < YG.MAX_LEVEL) {
         var cost = w.upgradeCost(c);
-        var self = this;
-        this.popupBtn = {
-          x: x + 14, y: y + 92, w: 150, h: 46, size: 17, style: 'primary',
+        btn = {
+          x: x + 14, y: y + 116, w: 132, h: 46, size: 17, style: 'primary',
           label: '升级 -' + cost + '兵', disabled: c.troops < cost + 1,
           act: function () { w.upgrade(self.human, c.id); }
         };
-        this.popupBtn.pressed = this.pressed === this.popupBtn;
-        D.button(ctx, this.popupBtn);
       } else {
-        D.text(ctx, '已满级', x + 20, y + 115, 16, T.dim, 'left', 'bold');
+        btn = { x: x + 14, y: y + 116, w: 132, h: 46, size: 17, label: '已满级', disabled: true, act: function () {} };
       }
-      D.text(ctx, '再点目标出兵', x + pw - 14, y + 115, 13, T.dim, 'right');
+      this.popupBtns.push(btn);
+      this.popupBtns.push({
+        x: x + pw - 146, y: y + 116, w: 132, h: 46, size: 17,
+        label: '断开连线', disabled: links === 0,
+        act: function () { w.cutLinks(self.human, c.id); }
+      });
     } else if (canTribute) {
-      var src = this.nearestOwn(c);
-      var self2 = this;
-      this.popupBtn = {
+      var src = this.tributeSource(c);
+      this.popupBtns.push({
         x: x + 14, y: y + 92, w: 150, h: 46, size: 17,
         label: '进贡示好', disabled: !src || src.troops < 2,
         act: function () {
-          var from = self2.nearestOwn(c);
-          if (from) w.tribute(self2.human, from.id, c.id, self2.ratio());
-          self2.select(null);
+          var from = self.tributeSource(c);
+          if (from) w.tribute(self.human, from.id, c.id, 0.5);
+          self.select(null);
         }
-      };
-      this.popupBtn.pressed = this.pressed === this.popupBtn;
-      D.button(ctx, this.popupBtn);
-      D.text(ctx, '送兵入城 → 疑忠', x + pw - 14, y + 115, 13, T.dim, 'right');
+      });
+      D.text(ctx, src ? '相邻城池送一半兵力' : '需与主公城池相连', x + pw - 14, y + 115, 13, T.dim, 'right');
+    }
+    for (var i = 0; i < this.popupBtns.length; i++) {
+      this.popupBtns[i].pressed = this.pressed && this.pressed.label === this.popupBtns[i].label;
+      D.button(ctx, this.popupBtns[i]);
     }
   };
 
-  GameScene.prototype.nearestOwn = function (c) {
+  /** 进贡的出兵城池：与目标相连、兵力最多的己方城池 */
+  GameScene.prototype.tributeSource = function (c) {
+    var w = this.world;
     var best = null;
-    var bestD = Infinity;
-    var cities = this.world.cities;
-    for (var i = 0; i < cities.length; i++) {
-      if (cities[i].owner !== this.human) continue;
-      var d = YG.dist(cities[i].x, cities[i].y, c.x, c.y);
-      if (d < bestD) {
-        bestD = d;
-        best = cities[i];
-      }
+    var nb = w.adj[c.id];
+    for (var i = 0; i < nb.length; i++) {
+      var o = w.cities[nb[i]];
+      if (o.owner === this.human && (!best || o.troops > best.troops)) best = o;
     }
     return best;
   };
@@ -672,7 +753,7 @@
     }
     D.text(ctx, seen, 122, y0 + 48, 14, me.rep <= -YG.REP_TAG ? '#ff8a80' : me.rep >= YG.REP_TAG ? '#8fd3ff' : T.dim);
     D.text(ctx, YG.formatTime(w.t), W - 16, y0 + 30, 24, T.gold, 'right', 'bold');
-    if (w.surgeIdx > 0) D.text(ctx, '产兵×' + w.prodMult + (w.defMult < 1 ? ' 城防×' + w.defMult : ''), W - 16, y0 + 52, 12, '#ff8a65', 'right');
+    if (w.surgeIdx > 0) D.text(ctx, '出兵×' + w.flowMult + (w.defMult < 1 ? ' 城防×' + w.defMult : ''), W - 16, y0 + 52, 12, '#ff8a65', 'right');
 
     // 锦囊
     for (var i = 0; i < YG.HAND_MAX_REWARD; i++) {
@@ -701,10 +782,13 @@
       D.text(ctx, full ? '锦囊已满，快用掉吧' : '下一张锦囊 ' + Math.ceil(me.cardT) + ' 秒', 16, by + 20, 12, T.dim);
     }
 
-    this.ratioBtn.label = '出兵 ' + Math.round(this.ratio() * 100) + '%';
-    this.ratioBtn.sub = '点击切换比例';
+    var myLinks = 0;
+    for (var li = 0; li < w.links.length; li++) if (w.links[li].owner === this.human) myLinks++;
+    this.cutAllBtn.label = '全部断线';
+    this.cutAllBtn.sub = '当前 ' + myLinks + ' 条连线 · 划线可切断';
+    this.cutAllBtn.disabled = myLinks === 0;
     this.speedBtn.label = '倍速 ×' + this.speed;
-    var btns = [this.ratioBtn, this.pauseBtn, this.speedBtn];
+    var btns = [this.cutAllBtn, this.pauseBtn, this.speedBtn];
     for (var k = 0; k < btns.length; k++) {
       btns[k].pressed = this.pressed === btns[k];
       D.button(ctx, btns[k]);
@@ -811,7 +895,7 @@
     ctx.stroke();
     D.text(ctx, YG.ROLE_NAME[me.role], W / 2, cy + 4, 72, col, 'center', 'bold', YG.FONT_TITLE);
     D.text(ctx, YG.ROLE_GOAL[me.role], W / 2, y + 300, 22, T.text, 'center', 'bold');
-    var tips = ROLE_TIPS[me.role].concat(['按住己方城池拖到目标出兵，主城开局免战 60 秒']);
+    var tips = ROLE_TIPS[me.role].concat(['从己方城池拖到有道路相连的城池建立连线，部队会源源不断出兵；在连线上划一下即可切断']);
     var ty = y + 350;
     for (var i = 0; i < tips.length; i++) {
       ty += D.paragraph(ctx, '· ' + tips[i], x + 40, ty, pw - 80, 17, T.dim, 26) + 8;

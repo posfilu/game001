@@ -220,20 +220,26 @@
       ctx.fillRect(rng.range(0, W), rng.range(r.y, r.y + r.h), s, s);
     }
 
-    // 道路
+    // 道路：只有道路相连的城池之间才能连线
     ctx.save();
-    D.dash(ctx, [2, 9]);
     ctx.lineCap = 'round';
-    ctx.strokeStyle = 'rgba(214,180,140,0.16)';
-    ctx.lineWidth = 3;
     var cities = this.w.cities;
-    for (var k = 0; k < this.w.roads.length; k++) {
-      var a = cities[this.w.roads[k][0]];
-      var b = cities[this.w.roads[k][1]];
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
+    var passes = [
+      { w: 9, c: 'rgba(0,0,0,0.35)' },
+      { w: 5, c: 'rgba(120,92,70,0.45)' },
+      { w: 1.5, c: 'rgba(230,200,160,0.22)' }
+    ];
+    for (var ps = 0; ps < passes.length; ps++) {
+      ctx.strokeStyle = passes[ps].c;
+      ctx.lineWidth = passes[ps].w;
+      for (var k = 0; k < this.w.roads.length; k++) {
+        var a = cities[this.w.roads[k][0]];
+        var b = cities[this.w.roads[k][1]];
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
     }
     ctx.restore();
 
@@ -348,19 +354,45 @@
       ctx.stroke();
     }
 
-    // 出兵预览线
+    // 可以连线的相邻城池
+    if (ui.neighborsOf && ui.neighborsOf.length) {
+      var near = {};
+      for (i = 0; i < ui.neighborsOf.length; i++) {
+        var nb = w.adj[ui.neighborsOf[i]];
+        for (var n = 0; n < nb.length; n++) if (ui.neighborsOf.indexOf(nb[n]) < 0) near[nb[n]] = true;
+      }
+      ctx.save();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,236,170,' + (0.35 + Math.sin(time * 5) * 0.15).toFixed(2) + ')';
+      D.dash(ctx, [5, 5], time * 12);
+      for (var id in near) {
+        var nc = w.cities[id];
+        ctx.beginPath();
+        ctx.arc(nc.x, nc.y, this.cityRadius(nc) + 12, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // 连线
+    for (i = 0; i < w.links.length; i++) this.drawLink(ctx, w.links[i], time);
+
+    // 连线预览：有道路为实色，没有道路为灰色
     if (ui.dragSel && ui.dragSel.length && ui.pointer) {
       var tgt = ui.hover != null ? w.cities[ui.hover] : null;
       var tx = tgt ? tgt.x : ui.pointer.x;
       var ty = tgt ? tgt.y : ui.pointer.y;
       var col = w.players[this.humanId].color;
+      var anyOk = false;
       ctx.save();
       D.dash(ctx, [10, 8], -time * 40);
       ctx.lineWidth = 4;
-      ctx.strokeStyle = YG.alpha(col, 0.85);
       for (i = 0; i < ui.dragSel.length; i++) {
         var s = w.cities[ui.dragSel[i]];
         if (tgt && s.id === tgt.id) continue;
+        var ok = !tgt || w.isAdjacent(s.id, tgt.id);
+        anyOk = anyOk || (tgt && ok);
+        ctx.strokeStyle = ok ? YG.alpha(col, 0.9) : 'rgba(160,150,150,0.45)';
         ctx.beginPath();
         ctx.moveTo(s.x, s.y);
         ctx.lineTo(tx, ty);
@@ -370,7 +402,7 @@
       if (tgt) {
         ctx.beginPath();
         ctx.arc(tgt.x, tgt.y, this.cityRadius(tgt) + 10, 0, Math.PI * 2);
-        ctx.strokeStyle = tgt.owner === this.humanId ? '#9be7a1' : '#ff7a6b';
+        ctx.strokeStyle = !anyOk ? 'rgba(160,150,150,0.8)' : tgt.owner === this.humanId ? '#9be7a1' : '#ff7a6b';
         ctx.lineWidth = 3;
         ctx.stroke();
       }
@@ -384,6 +416,69 @@
 
     // 特效
     for (i = 0; i < this.fx.length; i++) this.drawFx(ctx, this.fx[i]);
+
+    // 划线断开的轨迹
+    if (ui.trail && ui.trail.length > 1) {
+      ctx.save();
+      ctx.lineCap = 'round';
+      for (i = 1; i < ui.trail.length; i++) {
+        var p0 = ui.trail[i - 1];
+        var p1 = ui.trail[i];
+        ctx.strokeStyle = 'rgba(255,255,255,' + Math.max(0, 0.85 - p1.t * 2.4).toFixed(2) + ')';
+        ctx.lineWidth = 5 * Math.max(0.2, 1 - p1.t * 2.4);
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  };
+
+  /** 连线：势力颜色的宽带 + 向目标流动的虚线 + 箭头；两个方向的连线各靠道路一侧 */
+  WorldView.prototype.drawLink = function (ctx, l, time) {
+    var a = this.w.cities[l.from];
+    var b = this.w.cities[l.to];
+    var col = this.colorOf(l.owner);
+    var dx = b.x - a.x;
+    var dy = b.y - a.y;
+    var d = Math.sqrt(dx * dx + dy * dy) || 1;
+    var ux = dx / d;
+    var uy = dy / d;
+    var off = YG.LINK_OFFSET;
+    var ox = -uy * off;
+    var oy = ux * off;
+    var ra = this.cityRadius(a) + 2;
+    var rb = this.cityRadius(b) + 6;
+    var x1 = a.x + ux * ra + ox;
+    var y1 = a.y + uy * ra + oy;
+    var x2 = b.x - ux * rb + ox;
+    var y2 = b.y - uy * rb + oy;
+    var mine = l.owner === this.humanId;
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = YG.alpha(col, mine ? 0.5 : 0.35);
+    ctx.lineWidth = mine ? 7 : 5;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    D.dash(ctx, [6, 10], -time * 36);
+    ctx.strokeStyle = 'rgba(255,255,255,' + (mine ? 0.55 : 0.3) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.restore();
+    // 箭头
+    ctx.beginPath();
+    ctx.moveTo(x2 + ux * 6, y2 + uy * 6);
+    ctx.lineTo(x2 - ux * 6 - uy * 6, y2 - uy * 6 + ux * 6);
+    ctx.lineTo(x2 - ux * 6 + uy * 6, y2 - uy * 6 - ux * 6);
+    ctx.closePath();
+    ctx.fillStyle = col;
+    ctx.fill();
   };
 
   WorldView.prototype.drawCity = function (ctx, c, time, ui) {

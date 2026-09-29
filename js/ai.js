@@ -6,6 +6,7 @@
  *   反贼：先发育，时机合适就猛攻主公；跳忠的人也是敌人。
  *   内奸：前期装忠、保护主公，最后只剩自己和主公时再动手。
  * 进贡（向主公输送援军）会让名声变为「疑忠」：忠臣用它救主，内奸和反贼用它伪装。
+ * 出兵全部通过道路连线：进攻相邻城池、后方向前线输送补给、支援受威胁的城池，打不下来就断线。
  */
 (function (root) {
   var YG = root.YG || (root.YG = {});
@@ -67,6 +68,22 @@
     return s;
   };
 
+  /**
+   * 主公 / 忠臣的推理：还活着的忠臣有几个（阵亡身份公开可以算出来），
+   * 就把名声最「忠」的那几个人当自己人，其余都当敌人。
+   */
+  AI.prototype.presumedLoyal = function (owner) {
+    var w = this.w;
+    var me = w.players[this.pid];
+    var slots = this.roleCount(R.LOYAL, true) - (me.role === R.LOYAL ? 1 : 0);
+    if (slots <= 0) return false;
+    var others = w.alivePlayers()
+      .filter(function (p) { return p.id !== me.id && p.id !== w.lordId; })
+      .sort(function (a, b) { return b.rep - a.rep || a.id - b.id; });
+    for (var i = 0; i < slots && i < others.length; i++) if (others[i].id === owner) return true;
+    return false;
+  };
+
   function byRep(rep, whenRebelish, whenLoyalish, unknown) {
     var t = YG.clamp(rep / YG.REP_TAG, -1, 1);
     return t < 0 ? unknown + (whenRebelish - unknown) * -t : unknown + (whenLoyalish - unknown) * t;
@@ -76,7 +93,7 @@
   AI.prototype.hostility = function (owner) {
     var w = this.w;
     var late = w.t > 240 ? 0.25 : 0;
-    var stall = w.t > 420 ? 0.45 : 0; // 拖太久就不再客气
+    var stall = w.t > 420; // 拖太久就按名声排队推理身份
     if (owner < 0) return w.t > 300 ? 0.65 : 0.9;
     if (owner === this.pid) return 0;
     var me = w.players[this.pid];
@@ -86,11 +103,13 @@
     switch (me.role) {
       case R.LORD:
         if (this.allOthersHostile()) return 1.3;
-        return Math.max(stall, byRep(o.rep, 1.35, 0.02, 0.15 + late));
+        if (stall) return this.presumedLoyal(owner) ? 0.02 : 1.1;
+        return byRep(o.rep, 1.35, 0.02, 0.15 + late);
       case R.LOYAL:
         if (isLord) return 0;
         if (this.allOthersHostile()) return 1.3;
-        return Math.max(stall, byRep(o.rep, 1.4, 0.02, 0.3 + late));
+        if (stall) return this.presumedLoyal(owner) ? 0.02 : 1.1;
+        return byRep(o.rep, 1.4, 0.02, 0.3 + late);
       case R.REBEL: {
         if (isLord) {
           var lordPow = this.powerOf(w.lordId);
@@ -120,16 +139,71 @@
     return 0.3;
   };
 
+  /** 某城在 horizon 秒内面临的净压力（敌军 - 援军，已按城防折算） */
+  AI.prototype.pressure = function (c, horizon) {
+    var th = this.w.incomingThreat(c.id);
+    var h = horizon || 4;
+    return th.hostile + th.hostileRate * h - th.friendly - th.friendlyRate * h;
+  };
+
   AI.prototype.reserve = function (c) {
     var w = this.w;
     var base = c.kind === 'capital' ? Math.max(12, w.cityCap(c) * (this.duel ? 0.15 : 0.35)) : 3;
-    var th = w.incomingThreat(c.id);
-    return base + th.hostile * 1.1;
+    return base + Math.max(0, this.pressure(c)) * 1.1;
   };
 
   AI.prototype.mine = function () {
     var pid = this.pid;
     return this.w.cities.filter(function (c) { return c.owner === pid; });
+  };
+
+  AI.prototype.myLinks = function () {
+    var pid = this.pid;
+    return this.w.links.filter(function (l) { return l.owner === pid; });
+  };
+
+  /** 腾出一个连线位：优先拆掉向己方城池输送的连线；腾不出返回 false */
+  AI.prototype.makeRoom = function (c) {
+    var w = this.w;
+    var out = w.linksFrom(c.id);
+    if (out.length < w.maxLinks(c)) return true;
+    for (var i = 0; i < out.length; i++) {
+      if (w.cities[out[i].to].owner === this.pid) {
+        w.removeLink(out[i]);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /** 我方各城到前线的道路步数（前线 = 与想打的城池相邻），不连通的城没有值 */
+  AI.prototype.computeFront = function (mine) {
+    var w = this.w;
+    var dist = {};
+    var queue = [];
+    for (var i = 0; i < mine.length; i++) {
+      var nb = w.adj[mine[i].id];
+      for (var k = 0; k < nb.length; k++) {
+        var o = w.cities[nb[k]];
+        if (o.owner !== this.pid && this.hostility(o.owner) > 0.1) {
+          dist[mine[i].id] = 0;
+          queue.push(mine[i].id);
+          break;
+        }
+      }
+    }
+    while (queue.length) {
+      var id = queue.shift();
+      var nbs = w.adj[id];
+      for (var j = 0; j < nbs.length; j++) {
+        var n = nbs[j];
+        if (w.cities[n].owner === this.pid && dist[n] == null) {
+          dist[n] = dist[id] + 1;
+          queue.push(n);
+        }
+      }
+    }
+    return dist;
   };
 
   // ---------- 决策 ----------
@@ -147,144 +221,272 @@
     this.duel = this.w.alivePlayers().length === 2;
     var mine = this.mine();
     if (mine.length === 0) return;
+    this.front = this.computeFront(mine);
+    this.prune();
     this.defend(mine);
-    this.support(this.mine());
+    this.support(mine);
     if (this.rng.next() < this.diff.cards) this.useCards(mine);
-    var attacks = this.w.difficulty === 'hard' ? 2 : 1;
+    var attacks = this.diff.attacks;
     for (var i = 0; i < attacks; i++) {
-      if (!this.attack(this.mine())) break;
+      if (!this.attack(mine)) break;
     }
-    this.upgradeSome(this.mine());
-    this.consolidate(this.mine());
+    this.upgradeSome(mine);
+    this.supply(mine);
   };
 
+  /** 检查现有连线：不该打的、打不下来的、老家告急的都断开 */
+  AI.prototype.prune = function () {
+    var w = this.w;
+    var links = this.myLinks();
+    for (var i = 0; i < links.length; i++) {
+      var l = links[i];
+      var from = w.cities[l.from];
+      var to = w.cities[l.to];
+      var cut = false;
+      var homePressure = this.pressure(from);
+      if (to.owner === this.pid) {
+        // 己方之间：救援，或者从后方往前线输送
+        var helping = this.pressure(to) > to.troops * 0.3;
+        var fFrom = this.front[from.id];
+        var fTo = this.front[to.id];
+        var towardFront = fTo != null && (fFrom == null || fTo < fFrom);
+        var canSpare = from.troops > this.reserve(from) + 3 && to.troops < w.cityCap(to) * 1.2;
+        cut = !(helping || (towardFront && canSpare));
+        if (homePressure > from.troops * 0.5 && !helping) cut = true;
+      } else {
+        var h = this.hostility(to.owner);
+        if (h <= 0.06 || to.shieldT > 0) cut = true;
+        else if (homePressure > from.troops) cut = true; // 老家告急
+        else if (from.kind === 'capital' && !this.duel && from.troops < this.reserve(from)) cut = true;
+        else if (this.hopeless(to)) cut = true;
+      }
+      if (cut) w.removeLink(l);
+    }
+  };
+
+  /**
+   * 粗略推演：用 sources 这些城池连线进攻 target，逐秒计算流量、存兵消耗、补给和对方产兵。
+   * 返回 { t: 几秒打下, spent: 花费兵力 }；horizon 秒内打不下返回 null。
+   */
+  AI.prototype.siege = function (target, sources, horizon) {
+    var w = this.w;
+    var KIND = YG.CITY_KIND;
+    var def = w.cityDef(target);
+    var th = w.incomingThreat(target.id);
+    var hp = target.troops + th.friendly;
+    for (var i = 0; i < w.packets.length; i++) {
+      var pk = w.packets[i];
+      if (pk.owner === this.pid && pk.to === target.id) hp -= (pk.count * pk.atk) / def;
+    }
+    var regen = (target.owner >= 0 ? w.cityProd(target) : 0) + th.friendlyRate;
+    var self = this;
+    var st = sources.map(function (c) {
+      return {
+        stock: Math.max(0, c.troops - self.reserve(c)),
+        sustain: w.cityProd(c) + w.incomingThreat(c.id).friendlyRate,
+        base: YG.LINK_RATE[c.level - 1],
+        atk: KIND[c.kind].atk || 1
+      };
+    });
+    var spent = 0;
+    for (var t = 1; t <= horizon; t++) {
+      if (hp < 0) return { t: t, spent: spent };
+      var dmg = 0;
+      for (var k = 0; k < st.length; k++) {
+        var x = st[k];
+        var rate = Math.min(YG.LINK_RATE_MAX, x.base + x.stock * YG.LINK_RATE_PER_TROOP) * w.flowMult;
+        var send = Math.min(rate, x.stock + x.sustain);
+        x.stock = Math.max(0, x.stock + x.sustain - send);
+        spent += send;
+        dmg += (send * x.atk) / def;
+      }
+      hp += regen - dmg;
+    }
+    return hp < 0 ? { t: horizon, spent: spent } : null;
+  };
+
+  /** 我方正在进攻某城的连线源城池 */
+  AI.prototype.attackers = function (targetId) {
+    var w = this.w;
+    var out = [];
+    for (var i = 0; i < w.links.length; i++) {
+      var l = w.links[i];
+      if (l.owner === this.pid && l.to === targetId) out.push(w.cities[l.from]);
+    }
+    return out;
+  };
+
+  /** 我方对某城的攻势是否无望：一分钟内推演打不下来 */
+  AI.prototype.hopeless = function (target) {
+    return !this.siege(target, this.attackers(target.id), 60);
+  };
+
+  /** 受威胁的城：相邻的己方城池连线过去支援；主城告急时先收回主城的进攻连线 */
   AI.prototype.defend = function (mine) {
     var w = this.w;
+    var pid = this.pid;
+    var self = this;
     var sorted = mine.slice().sort(function (a, b) { return (b.kind === 'capital') - (a.kind === 'capital'); });
     for (var i = 0; i < sorted.length; i++) {
       var c = sorted[i];
-      var th = w.incomingThreat(c.id);
-      if (th.hostile <= 0) continue;
-      var deficit = th.hostile - (c.troops + th.friendly) + 4;
+      var deficit = this.pressure(c, 5) - c.troops + 4;
       if (deficit <= 0) continue;
-      var helpers = mine
-        .filter(function (h) { return h !== c && w.incomingThreat(h.id).hostile < h.troops * 0.5; })
-        .sort(function (a, b) { return YG.dist(a.x, a.y, c.x, c.y) - YG.dist(b.x, b.y, c.x, c.y); });
+      if (c.kind === 'capital') {
+        w.linksFrom(c.id).forEach(function (l) {
+          if (w.cities[l.to].owner !== pid) w.removeLink(l);
+        });
+      }
+      var helpers = w.adj[c.id]
+        .map(function (id) { return w.cities[id]; })
+        .filter(function (h) {
+          return h.owner === pid && !w.findLink(h.id, c.id) && h.troops >= 5 && self.pressure(h) < h.troops * 0.5;
+        })
+        .sort(function (a, b) { return b.troops - a.troops; });
       for (var k = 0; k < helpers.length && deficit > 0; k++) {
-        var h = helpers[k];
-        if (YG.dist(h.x, h.y, c.x, c.y) > 480) break;
-        var avail = h.troops - (h.kind === 'capital' && c.kind !== 'capital' ? this.reserve(h) : 2);
-        if (avail < 3) continue;
-        var amt = Math.min(avail, deficit * 1.15);
-        w.dispatch(this.pid, [h.id], c.id, amt / h.troops);
-        deficit -= amt;
+        if (w.link(pid, helpers[k].id, c.id) === 'linked') deficit -= helpers[k].troops * 0.7 + w.linkRate(helpers[k]) * 3;
       }
     }
   };
 
-  /** 向主公进贡：忠臣救主，内奸装忠 / 必要时保主，反贼偶尔伪装 */
+  /** 向主公进贡：忠臣救主，内奸装忠 / 必要时保主，反贼偶尔伪装（需要与主公的城池相连） */
   AI.prototype.support = function (mine) {
     var w = this.w;
     var me = w.players[this.pid];
     var lord = w.players[w.lordId];
     if (me.role === R.LORD || !lord.alive) return;
+    if (me.role === R.LOYAL && this.relay(mine)) return;
     var cap = w.cities[lord.capitalId];
     if (cap.owner !== lord.id) return;
     var th = w.incomingThreat(cap.id);
-    var deficit = th.hostile - (cap.troops + th.friendly) + 6;
+    var deficit = th.hostile + th.hostileRate * 5 - (cap.troops + th.friendly) + 6;
     var want = 0;
+    var capitalOnly = true;
     if (me.role === R.LOYAL) {
       if (deficit > 0) want = deficit;
     } else if (me.role === R.SPY) {
       var others = w.alivePlayers().length - 2;
       if (deficit > 0 && others > 0) want = deficit;
-      else if (!this.gaveTribute && w.t < 150 && me.rep < YG.REP_TAG) want = 12;
+      else if (!this.gaveTribute && w.t < 150 && me.rep < YG.REP_TAG) {
+        want = 12;
+        capitalOnly = false;
+      }
     } else if (me.role === R.REBEL) {
-      if (!this.gaveTribute && w.t > 20 && w.t < 90 && me.rep <= 0 && this.rng.next() < 0.08) want = 8;
+      if (!this.gaveTribute && w.t > 20 && w.t < 90 && me.rep <= 0 && this.rng.next() < 0.08) {
+        want = 8;
+        capitalOnly = false;
+      }
     }
     if (want <= 0) return;
-    var self = this;
-    var src = mine
-      .filter(function (c) { return c.troops - self.reserve(c) >= 5 && YG.dist(c.x, c.y, cap.x, cap.y) < 600; })
-      .sort(function (a, b) { return YG.dist(a.x, a.y, cap.x, cap.y) - YG.dist(b.x, b.y, cap.x, cap.y); })[0];
-    if (!src) return;
-    var amt = Math.min(src.troops - this.reserve(src), want);
-    if (w.tribute(this.pid, src.id, cap.id, Math.min(1, (amt + 0.999) / src.troops)) > 0) this.gaveTribute = true;
+    // 找与主公城池相连、兵力最充足的己方城池
+    var best = null;
+    var bestAvail = 5;
+    for (var i = 0; i < mine.length; i++) {
+      var src = mine[i];
+      var avail = src.troops - this.reserve(src);
+      if (avail < bestAvail) continue;
+      var nb = w.adj[src.id];
+      for (var k = 0; k < nb.length; k++) {
+        var dst = w.cities[nb[k]];
+        if (dst.owner !== lord.id || (capitalOnly && dst !== cap)) continue;
+        best = { src: src, dst: dst, avail: avail };
+        bestAvail = avail;
+        break;
+      }
+    }
+    if (!best) return;
+    var amt = Math.min(best.avail, want);
+    if (w.tribute(this.pid, best.src.id, best.dst.id, Math.min(1, (amt + 0.999) / best.src.troops)) > 0) {
+      this.gaveTribute = true;
+    }
   };
 
-  AI.prototype.attack = function (mine) {
+  /** 忠臣被主公的领地挡住、没有自己的前线时，把多余兵力进贡给相邻的主公城池，由主公带去打仗 */
+  AI.prototype.relay = function (mine) {
     var w = this.w;
-    var self = this;
+    if (Object.keys(this.front).length > 0) return false;
     var best = null;
-    var bestScore = 0;
-    for (var t = 0; t < w.cities.length; t++) {
-      var target = w.cities[t];
-      if (target.owner === this.pid) continue;
-      var h = this.hostility(target.owner);
-      if (h <= 0.06) continue;
-      if (target.shieldT > 0) continue;
-
-      // 攻打主城时多路齐发
-      var isCapital = target.capitalOf >= 0;
-      var allIn = isCapital && this.duel;
-      var sources = mine
-        .map(function (c) {
-          return { c: c, d: YG.dist(c.x, c.y, target.x, target.y), avail: c.troops - self.reserve(c) };
-        })
-        .filter(function (s) { return s.avail >= 3 && (allIn || s.d < (isCapital ? 720 : 560)); })
-        .sort(function (a, b) { return a.d - b.d; })
-        .slice(0, allIn ? 99 : isCapital ? 6 : 3);
-      if (sources.length === 0) continue;
-
-      var def = w.cityDef(target);
-      var travel = sources[0].d / YG.UNIT_SPEED;
-      var growth = 0;
-      if (target.owner >= 0) {
-        growth = Math.min(Math.max(0, w.cityCap(target) - target.troops), w.cityProd(target) * travel);
-      }
-      var th = w.incomingThreat(target.id);
-      var mineIncoming = 0;
-      for (var p = 0; p < w.packets.length; p++) {
-        var pk = w.packets[p];
-        if (pk.to === target.id && pk.owner === this.pid) mineIncoming += (pk.count * pk.atk) / def;
-      }
-      for (var s = 0; s < w.streams.length; s++) {
-        var st = w.streams[s];
-        if (st.to === target.id && st.owner === this.pid) mineIncoming += (st.remaining * st.atk) / def;
-      }
-      var needed = (target.troops + growth - mineIncoming) * def + 3 + sources[0].d * 0.01;
-      if (needed <= 0) continue;
-      // 有别人正在打这座城时，可以捡漏
-      if (th.hostile - mineIncoming > 0 && target.owner >= 0) needed *= 0.85;
-
-      var total = 0;
-      for (var q = 0; q < sources.length; q++) total += sources[q].avail;
-      if (total < needed * 1.05) continue;
-
-      var value = 10 + target.level * 4;
-      if (target.kind === 'tower') value += 3;
-      if (target.kind === 'barracks' || target.kind === 'stable') value += 4;
-      if (target.center) value += 6;
-      if (isCapital && h > 0.6) value += this.duel ? 120 : 35; // 一击致命
-      var score = (h * value) / (needed + 8 + sources[0].d * 0.04);
-      score *= 1 + (this.rng.next() - 0.5) * (1.1 - this.diff.greed);
-      if (score > bestScore) {
-        bestScore = score;
-        // 主城会有援军，多派一些余量
-        var margin = isCapital ? (this.duel ? 2 : 1.4) : 1.1;
-        best = { target: target, sources: sources, needed: Math.min(total, needed * margin) };
+    for (var i = 0; i < mine.length; i++) {
+      var src = mine[i];
+      if (src.troops < w.cityCap(src) * 0.7 || src.troops - this.reserve(src) < 10) continue;
+      var nb = w.adj[src.id];
+      for (var k = 0; k < nb.length; k++) {
+        var dst = w.cities[nb[k]];
+        if (dst.owner !== w.lordId) continue;
+        var need = dst.troops / w.cityCap(dst);
+        if (!best || need < best.need) best = { src: src, dst: dst, need: need };
       }
     }
     if (!best) return false;
-    var left = best.needed;
-    for (var i = 0; i < best.sources.length && left > 0; i++) {
-      var src = best.sources[i];
-      var amt = Math.min(src.avail, left);
-      if (amt < 1) continue;
-      w.dispatch(this.pid, [src.c.id], best.target.id, Math.min(1, (amt + 0.999) / src.c.troops));
-      left -= amt;
+    return w.tribute(this.pid, best.src.id, best.dst.id, 0.6) > 0;
+  };
+
+  /** 选一个相邻的目标城池，从与它相连的己方城池拉线进攻 */
+  AI.prototype.attack = function (mine) {
+    var w = this.w;
+    var pid = this.pid;
+    var self = this;
+    var seen = {};
+    var best = null;
+    var bestScore = 0;
+    for (var i = 0; i < mine.length; i++) {
+      var nb = w.adj[mine[i].id];
+      for (var n = 0; n < nb.length; n++) {
+        var t = nb[n];
+        if (seen[t]) continue;
+        seen[t] = true;
+        var target = w.cities[t];
+        if (target.owner === pid || target.shieldT > 0) continue;
+        var h = this.hostility(target.owner);
+        if (h <= 0.06) continue;
+        var isCapital = target.capitalOf >= 0;
+
+        var cand = w.adj[t]
+          .map(function (id) { return w.cities[id]; })
+          .filter(function (c) {
+            return c.owner === pid && !w.findLink(c.id, t) && c.troops - self.reserve(c) >= 4 &&
+              (w.linksFrom(c.id).length < w.maxLinks(c) || self.hasSupplyLink(c));
+          })
+          .sort(function (a, b) { return b.troops - a.troops; })
+          .slice(0, isCapital ? 6 : 4);
+        if (cand.length === 0) continue;
+
+        // 用最少的城池拿下：逐个加入进攻方，直到推演能打下来
+        var existing = this.attackers(t);
+        var chosen = [];
+        var res = null;
+        for (var k = 0; k < cand.length && !res; k++) {
+          chosen.push(cand[k]);
+          res = this.siege(target, existing.concat(chosen), 40);
+        }
+        if (!res) continue;
+
+        var value = 10 + target.level * 4;
+        if (target.kind === 'tower') value += 3;
+        if (target.kind === 'barracks' || target.kind === 'stable') value += 4;
+        if (target.center) value += 6;
+        if (isCapital && h > 0.6) value += this.duel ? 120 : 35; // 一击致命
+        var score = (h * value) / (res.spent * 0.5 + res.t * 1.5 + 8);
+        score *= 1 + (this.rng.next() - 0.5) * (1.1 - this.diff.greed);
+        if (score > bestScore) {
+          bestScore = score;
+          // 攻打主城时多拉几条线，防止对方援军翻盘
+          best = { target: target, chosen: isCapital ? cand : chosen };
+        }
+      }
+    }
+    if (!best) return false;
+    for (var j = 0; j < best.chosen.length; j++) {
+      var c = best.chosen[j];
+      if (this.makeRoom(c)) w.link(pid, c.id, best.target.id);
     }
     return true;
+  };
+
+  AI.prototype.hasSupplyLink = function (c) {
+    var w = this.w;
+    var out = w.linksFrom(c.id);
+    for (var i = 0; i < out.length; i++) if (w.cities[out[i].to].owner === this.pid) return true;
+    return false;
   };
 
   AI.prototype.upgradeSome = function (mine) {
@@ -297,7 +499,7 @@
       if (c.level >= YG.MAX_LEVEL) continue;
       var cost = w.upgradeCost(c);
       var safety = c.kind === 'capital' ? 25 : 8;
-      if (w.incomingThreat(c.id).hostile > 0) continue;
+      if (this.pressure(c) > 0) continue;
       if (c.troops >= cost + safety && c.troops >= w.cityCap(c) * 0.8) {
         w.upgrade(this.pid, c.id);
         return;
@@ -305,41 +507,28 @@
     }
   };
 
-  /** 后方满员的城池把兵力送往前线 */
-  AI.prototype.consolidate = function (mine) {
-    if (mine.length < 2) return;
+  /** 后方兵力充足的城池沿道路向前线输送（形成补给线） */
+  AI.prototype.supply = function (mine) {
     var w = this.w;
-    var self = this;
-    var hostileCities = w.cities.filter(function (c) { return c.owner !== self.pid && self.hostility(c.owner) > 0.3; });
-    if (hostileCities.length === 0) return;
-    function frontDist(c) {
-      var m = Infinity;
-      for (var i = 0; i < hostileCities.length; i++) {
-        var d = YG.dist(c.x, c.y, hostileCities[i].x, hostileCities[i].y);
-        if (d < m) m = d;
-      }
-      return m;
-    }
-    for (var i = 0; i < mine.length; i++) {
-      var c = mine[i];
-      if (c.troops < w.cityCap(c) * 0.9 || c.kind === 'capital') continue;
-      var fd = frontDist(c);
+    var pid = this.pid;
+    var made = 0;
+    var sorted = mine.slice().sort(function (a, b) { return b.troops / w.cityCap(b) - a.troops / w.cityCap(a); });
+    for (var i = 0; i < sorted.length && made < 2; i++) {
+      var c = sorted[i];
+      var f = this.front[c.id];
+      if (f == null || f === 0) continue;
+      if (w.linksFrom(c.id).length > 0) continue;
+      var full = c.troops / w.cityCap(c);
+      if (full < (c.kind === 'capital' && !this.duel ? 0.85 : 0.6)) continue;
       var dest = null;
-      var destD = Infinity;
-      for (var k = 0; k < mine.length; k++) {
-        var o = mine[k];
-        if (o === c) continue;
-        var ofd = frontDist(o);
-        var d = YG.dist(c.x, c.y, o.x, o.y);
-        if (ofd < fd - 60 && d < 380 && d < destD && o.troops < w.cityCap(o) * 0.8) {
-          dest = o;
-          destD = d;
-        }
+      var nb = w.adj[c.id];
+      for (var k = 0; k < nb.length; k++) {
+        var o = w.cities[nb[k]];
+        var fo = this.front[o.id];
+        if (o.owner !== pid || fo == null || fo >= f) continue;
+        if (!dest || fo < this.front[dest.id] || (fo === this.front[dest.id] && o.troops < dest.troops)) dest = o;
       }
-      if (dest) {
-        w.dispatch(this.pid, [c.id], dest.id, 0.6);
-        return;
-      }
+      if (dest && w.link(pid, c.id, dest.id) === 'linked') made++;
     }
   };
 

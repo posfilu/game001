@@ -48,6 +48,18 @@
     return Math.sqrt(dx * dx + dy * dy);
   }
 
+  /** 线段 (x1,y1)-(x2,y2) 与 (x3,y3)-(x4,y4) 是否相交 */
+  function segmentsCross(x1, y1, x2, y2, x3, y3, x4, y4) {
+    function orient(ax, ay, bx, by, cx, cy) {
+      return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    }
+    var o1 = orient(x1, y1, x2, y2, x3, y3);
+    var o2 = orient(x1, y1, x2, y2, x4, y4);
+    var o3 = orient(x3, y3, x4, y4, x1, y1);
+    var o4 = orient(x3, y3, x4, y4, x2, y2);
+    return o1 * o2 <= 0 && o3 * o4 <= 0 && !(o1 === 0 && o2 === 0);
+  }
+
   function clamp(v, a, b) {
     return v < a ? a : v > b ? b : v;
   }
@@ -80,6 +92,7 @@
   YG.Rng = Rng;
   YG.dist = dist;
   YG.clamp = clamp;
+  YG.segmentsCross = segmentsCross;
   YG.mix = mix;
   YG.alpha = alpha;
   YG.formatTime = formatTime;

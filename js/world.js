@@ -7,6 +7,8 @@
  *   - 击杀反贼：击杀者获得 2 张锦囊奖励；主公击杀忠臣：弃置全部锦囊且全军兵力减半。
  *   - 主公阵亡时，若场上只剩内奸则内奸胜，否则反贼胜；反贼与内奸全部阵亡则主公与忠臣胜。
  *   - 可以向主公进贡兵力「示好」，名声变为疑忠（内奸、反贼也可以借此伪装）。
+ *
+ * 出兵方式：城池之间有道路才能连线；连线后源城池沿道路源源不断地出兵，直到断线。
  */
 (function (root) {
   var YG = root.YG || (root.YG = {});
@@ -23,10 +25,12 @@
 
     this.t = 0;
     this.packets = [];
-    this.streams = [];
+    this.streams = []; // 一次性出兵（进贡）
+    this.links = []; // 连线：{ owner, from, to, timer, born }
     this.events = [];
     this.winner = null;
     this.prodMult = 1;
+    this.flowMult = 1;
     this.defMult = 1;
     this.surgeIdx = 0;
     this._pid = 0;
@@ -34,6 +38,7 @@
     var map = YG.generateMap(this.rng, this.numPlayers, this.rect);
     this.cities = map.cities;
     this.roads = map.roads;
+    this.adj = map.adj;
 
     // 分配身份：humanRole 指定时让玩家坐到对应身份的座位上
     var roles = this.rng.shuffle(YG.ROLE_SETUP[this.numPlayers].slice());
@@ -98,6 +103,35 @@
     return c.kind === 'capital' ? Math.round(cost * 1.5) : cost;
   };
 
+  World.prototype.isAdjacent = function (a, b) {
+    return !!this.adj[a] && this.adj[a].indexOf(b) >= 0;
+  };
+
+  World.prototype.maxLinks = function (c) {
+    return YG.LINK_SLOTS[c.level - 1] + (c.kind === 'capital' ? 1 : 0);
+  };
+
+  World.prototype.linkRate = function (c) {
+    var r = YG.LINK_RATE[c.level - 1] + Math.max(0, c.troops) * YG.LINK_RATE_PER_TROOP;
+    return Math.min(YG.LINK_RATE_MAX, r) * this.flowMult;
+  };
+
+  /** 连线出兵时城里至少留下的兵力（只有主城需要留守） */
+  World.prototype.guard = function (c) {
+    return c.kind === 'capital' ? this.cityCap(c) * YG.CAPITAL_GUARD : 0;
+  };
+
+  World.prototype.linksFrom = function (cityId) {
+    return this.links.filter(function (l) { return l.from === cityId; });
+  };
+
+  World.prototype.findLink = function (fromId, toId) {
+    for (var i = 0; i < this.links.length; i++) {
+      if (this.links[i].from === fromId && this.links[i].to === toId) return this.links[i];
+    }
+    return null;
+  };
+
   World.prototype.alivePlayers = function () {
     return this.players.filter(function (p) { return p.alive; });
   };
@@ -157,7 +191,53 @@
 
   // ---------- 玩家指令 ----------
 
-  /** 从若干己方城池向目标城池出兵，ratio 为出兵比例；aid 为向主公进贡的援军 */
+  /**
+   * 建立连线：from 必须是自己的城池，且与 to 有道路相连。
+   * 超出该城的连线上限时，替换掉最早的一条。
+   * 返回 'linked' | 'exists' | 'noroad' | 'shield' | 'invalid'
+   */
+  World.prototype.link = function (pid, fromId, toId) {
+    if (this.winner || !this.players[pid] || !this.players[pid].alive) return 'invalid';
+    var from = this.cities[fromId];
+    var to = this.cities[toId];
+    if (!from || !to || from.owner !== pid || fromId === toId) return 'invalid';
+    if (!this.isAdjacent(fromId, toId)) return 'noroad';
+    if (to.owner !== pid && to.shieldT > 0) return 'shield';
+    if (this.findLink(fromId, toId)) return 'exists';
+    var mine = this.linksFrom(fromId);
+    if (mine.length >= this.maxLinks(from)) this.removeLink(mine[0]);
+    this.links.push({ owner: pid, from: fromId, to: toId, timer: 0, born: this.t });
+    return 'linked';
+  };
+
+  World.prototype.removeLink = function (l) {
+    var i = this.links.indexOf(l);
+    if (i >= 0) this.links.splice(i, 1);
+  };
+
+  World.prototype.unlink = function (pid, fromId, toId) {
+    var l = this.findLink(fromId, toId);
+    if (!l || l.owner !== pid) return false;
+    this.removeLink(l);
+    return true;
+  };
+
+  /** 有连线就断开，没有就建立；返回 'unlinked' 或 link() 的结果 */
+  World.prototype.toggleLink = function (pid, fromId, toId) {
+    if (this.unlink(pid, fromId, toId)) return 'unlinked';
+    return this.link(pid, fromId, toId);
+  };
+
+  /** 断开某座城（省略时为全部城池）的所有连线，返回断开的条数 */
+  World.prototype.cutLinks = function (pid, fromId) {
+    var before = this.links.length;
+    this.links = this.links.filter(function (l) {
+      return !(l.owner === pid && (fromId == null || l.from === fromId));
+    });
+    return before - this.links.length;
+  };
+
+  /** 一次性出兵（目前用于进贡）：只能沿道路送往相邻城池；aid 为向主公进贡的援军 */
   World.prototype.dispatch = function (pid, fromIds, toId, ratio, aid) {
     if (this.winner || !this.players[pid].alive) return 0;
     var target = this.cities[toId];
@@ -165,7 +245,7 @@
     var sent = 0;
     for (var i = 0; i < fromIds.length; i++) {
       var from = this.cities[fromIds[i]];
-      if (!from || from.owner !== pid || from.id === toId) continue;
+      if (!from || from.owner !== pid || from.id === toId || !this.isAdjacent(from.id, toId)) continue;
       var n = Math.floor(from.troops * (ratio == null ? 0.5 : ratio));
       if (n < 1) continue;
       from.troops -= n;
@@ -189,7 +269,7 @@
     return sent;
   };
 
-  /** 向主公进贡（示好）：兵力送入主公的城池，不会被主公的箭塔和部队拦截 */
+  /** 向主公进贡（示好）：兵力沿道路送入相邻的主公城池，不会被主公的箭塔和部队拦截 */
   World.prototype.tribute = function (pid, fromId, toId, ratio) {
     var to = this.cities[toId];
     if (!to || pid === this.lordId || to.owner !== this.lordId || !this.players[this.lordId].alive) return 0;
@@ -282,13 +362,14 @@
     this.t += dt;
 
     if (this.surgeIdx < YG.SURGE.length && this.t >= YG.SURGE[this.surgeIdx].t) {
-      this.prodMult = YG.SURGE[this.surgeIdx].mult;
+      this.flowMult = YG.SURGE[this.surgeIdx].flow;
       this.defMult = YG.SURGE[this.surgeIdx].def;
       this.emit('surge', { text: YG.SURGE[this.surgeIdx].text });
       this.surgeIdx++;
     }
 
     this.stepCities(dt);
+    this.stepLinks(dt);
     this.stepStreams(dt);
     this.stepPackets(dt);
     this.stepCards(dt);
@@ -337,6 +418,41 @@
     if (best.count <= 0.001) best.dead = true;
   };
 
+  World.prototype.stepLinks = function (dt) {
+    for (var i = this.links.length - 1; i >= 0; i--) {
+      var l = this.links[i];
+      var from = this.cities[l.from];
+      if (from.owner !== l.owner || !this.players[l.owner].alive) {
+        this.links.splice(i, 1);
+        continue;
+      }
+      l.timer -= dt;
+      // 城里没兵就等产兵，攒够一队再出；流量大时每队人数变多
+      while (l.timer <= 0) {
+        var rate = this.linkRate(from);
+        var interval = Math.max(1 / rate, 1 / YG.LINK_PACKETS_PER_SEC);
+        var size = rate * interval;
+        if (from.troops - size < this.guard(from)) {
+          l.timer = 0;
+          break;
+        }
+        l.timer += interval;
+        from.troops -= size;
+        var kind = KIND[from.kind];
+        this.spawnPacket({
+          owner: l.owner,
+          to: l.to,
+          atk: kind.atk || 1,
+          speed: YG.UNIT_SPEED * (kind.speed || 1),
+          heavy: !!kind.atk,
+          cavalry: !!kind.speed,
+          intent: this.cities[l.to].owner,
+          aid: false
+        }, from, size);
+      }
+    }
+  };
+
   World.prototype.stepStreams = function (dt) {
     for (var i = this.streams.length - 1; i >= 0; i--) {
       var s = this.streams[i];
@@ -363,8 +479,8 @@
     var dy = to.y - from.y;
     var d = Math.sqrt(dx * dx + dy * dy) || 1;
     var r = KIND[from.kind].radius;
-    // 小队在行军线两侧轻微错开，看起来像一条队伍
-    var side = (this.rng.next() - 0.5) * 10;
+    // 小队沿连线所在的道路一侧行进，轻微错开，看起来像一条队伍
+    var side = YG.LINK_OFFSET + (this.rng.next() - 0.5) * 4;
     this.packets.push({
       id: this._pid++,
       owner: s.owner,
@@ -489,6 +605,12 @@
     c.troops = troops;
     c.flash = 1;
     c.shieldT = 0;
+    // 城池易主：原主人从这里拉出的连线失效；别人攻打这座城的连线自动断开（目标换了主人，需重新决定）
+    this.links = this.links.filter(function (l) {
+      if (l.from === c.id) return l.owner === newOwner;
+      if (l.to === c.id) return l.owner === newOwner;
+      return true;
+    });
     var np = this.players[newOwner];
     np.stats.captured++;
     var nc = this.power(newOwner).cities;
@@ -530,6 +652,7 @@
       if (this.packets[i].owner === victimId) this.packets[i].dead = true;
     }
     this.streams = this.streams.filter(function (s) { return s.owner !== victimId; });
+    this.links = this.links.filter(function (l) { return l.owner !== victimId; });
 
     var reward = null;
     if (v.role === YG.ROLE.REBEL) {
@@ -583,12 +706,25 @@
     }
   };
 
-  /** 敌军正在奔向某城的总攻击力（已按城防折算），供 AI 与界面使用 */
+  /**
+   * 某城受到的威胁（已按城防折算），供 AI 与界面使用：
+   *   hostile / friendly：路上的敌军 / 援军；hostileRate / friendlyRate：连线每秒送来的敌军 / 援军
+   */
   World.prototype.incomingThreat = function (cityId) {
     var c = this.cities[cityId];
     var def = this.cityDef(c);
     var hostile = 0;
     var friendly = 0;
+    var hostileRate = 0;
+    var friendlyRate = 0;
+    for (var li = 0; li < this.links.length; li++) {
+      var l = this.links[li];
+      if (l.to !== cityId) continue;
+      var src = this.cities[l.from];
+      var rate = src.troops >= 2 ? this.linkRate(src) : Math.min(this.linkRate(src), this.cityProd(src));
+      if (l.owner === c.owner) friendlyRate += rate;
+      else hostileRate += (rate * (KIND[src.kind].atk || 1)) / def;
+    }
     for (var i = 0; i < this.packets.length; i++) {
       var pk = this.packets[i];
       if (pk.to !== cityId) continue;
@@ -601,7 +737,7 @@
       if (st.owner === c.owner || this.isAidFor(st, c.owner)) friendly += st.remaining;
       else hostile += (st.remaining * st.atk) / def;
     }
-    return { hostile: hostile, friendly: friendly };
+    return { hostile: hostile, friendly: friendly, hostileRate: hostileRate, friendlyRate: friendlyRate };
   };
 
   YG.World = World;

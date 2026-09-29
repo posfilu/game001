@@ -1,4 +1,4 @@
-/* 地图生成：主城环形分布，其余城池泊松采样散布，中心是中立大城「酆都」 */
+/* 地图生成：主城环形分布，其余城池泊松采样散布，中心是中立大城「酆都」；城池之间修建道路网 */
 (function (root) {
   var YG = root.YG || (root.YG = {});
 
@@ -8,6 +8,93 @@
       if (YG.dist(list[i].x, list[i].y, x, y) < need) return false;
     }
     return true;
+  }
+
+  // 两条线段是否在内部相交（共享端点不算）
+  function crosses(a, b, c, d) {
+    if (a === c || a === d || b === c || b === d) return false;
+    function orient(p, q, r) {
+      return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    }
+    var o1 = orient(a, b, c);
+    var o2 = orient(a, b, d);
+    var o3 = orient(c, d, a);
+    var o4 = orient(c, d, b);
+    return o1 * o2 < 0 && o3 * o4 < 0;
+  }
+
+  function distToSegment(p, a, b) {
+    var dx = b.x - a.x;
+    var dy = b.y - a.y;
+    var len2 = dx * dx + dy * dy || 1;
+    var t = YG.clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0, 1);
+    return YG.dist(p.x, p.y, a.x + dx * t, a.y + dy * t);
+  }
+
+  /**
+   * 道路网：先用最短边把所有城池连通（Kruskal），再补充不交叉的短边。
+   * 道路不交叉、不穿过其他城池，相邻主城之间不直接修路。
+   */
+  function buildRoads(cities) {
+    var n = cities.length;
+    var cand = [];
+    for (var i = 0; i < n; i++) {
+      for (var j = i + 1; j < n; j++) {
+        cand.push({ a: i, b: j, d: YG.dist(cities[i].x, cities[i].y, cities[j].x, cities[j].y) });
+      }
+    }
+    cand.sort(function (p, q) { return p.d - q.d; });
+
+    var roads = [];
+    var deg = [];
+    var parent = [];
+    for (var k = 0; k < n; k++) {
+      deg.push(0);
+      parent.push(k);
+    }
+    function find(x) {
+      while (parent[x] !== x) x = parent[x] = parent[parent[x]];
+      return x;
+    }
+    function clear(e) {
+      var A = cities[e.a];
+      var B = cities[e.b];
+      for (var r = 0; r < roads.length; r++) {
+        if (crosses(A, B, cities[roads[r][0]], cities[roads[r][1]])) return false;
+      }
+      for (var c = 0; c < n; c++) {
+        if (c === e.a || c === e.b) continue;
+        var rad = YG.CITY_KIND[cities[c].kind].radius + 14;
+        if (distToSegment(cities[c], A, B) < rad) return false;
+      }
+      return true;
+    }
+    function add(e) {
+      roads.push([e.a, e.b]);
+      deg[e.a]++;
+      deg[e.b]++;
+      parent[find(e.a)] = find(e.b);
+      e.used = true;
+    }
+
+    // 1. 连通：最短边优先，只连接不同的连通块
+    for (var pass = 0; pass < 2; pass++) {
+      for (var m = 0; m < cand.length; m++) {
+        var e = cand[m];
+        if (e.used || find(e.a) === find(e.b)) continue;
+        if (pass === 0 && e.d > YG.ROAD_MAX_LEN * 1.3) continue;
+        if (clear(e)) add(e);
+      }
+    }
+    // 2. 补路：不交叉的短边，控制每座城的道路数
+    for (var x = 0; x < cand.length; x++) {
+      var f = cand[x];
+      if (f.used || f.d > YG.ROAD_MAX_LEN) continue;
+      if (deg[f.a] >= YG.ROAD_MAX_DEGREE || deg[f.b] >= YG.ROAD_MAX_DEGREE) continue;
+      if (cities[f.a].kind === 'capital' && cities[f.b].kind === 'capital') continue;
+      if (clear(f)) add(f);
+    }
+    return roads;
   }
 
   /**
@@ -95,25 +182,13 @@
       }
     }
 
-    // 装饰用道路：每座城连向最近的两座城
-    var roads = [];
-    var seen = {};
-    for (var r = 0; r < cities.length; r++) {
-      var near = cities
-        .filter(function (o) { return o !== cities[r]; })
-        .map(function (o) { return { o: o, d: YG.dist(o.x, o.y, cities[r].x, cities[r].y) }; })
-        .sort(function (p, q) { return p.d - q.d; })
-        .slice(0, 2);
-      for (var q = 0; q < near.length; q++) {
-        var a = Math.min(r, near[q].o.id);
-        var b = Math.max(r, near[q].o.id);
-        if (!seen[a + '_' + b] && near[q].d < 260) {
-          seen[a + '_' + b] = true;
-          roads.push([a, b]);
-        }
-      }
+    var roads = buildRoads(cities);
+    var adj = cities.map(function () { return []; });
+    for (var e = 0; e < roads.length; e++) {
+      adj[roads[e][0]].push(roads[e][1]);
+      adj[roads[e][1]].push(roads[e][0]);
     }
 
-    return { cities: cities, roads: roads, capitals: capitals };
+    return { cities: cities, roads: roads, adj: adj, capitals: capitals };
   };
 })(typeof GameGlobal !== 'undefined' ? GameGlobal : typeof window !== 'undefined' ? window : globalThis);

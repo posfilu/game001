@@ -49,7 +49,7 @@
   // prod: 每秒产兵（1 级）；cap: 各等级兵力上限；def: 防御系数（攻方伤害 / def）
   YG.CITY_KIND = {
     capital: { label: '都', name: '主城', prod: 1.5, cap: [70, 110, 160], def: 2.0, radius: 34,
-      desc: '产兵快、城防高。主城被攻破即阵亡。' },
+      desc: '产兵快、城防高、留守三成兵力。被攻破即阵亡。' },
     city: { label: '城', name: '城池', prod: 1.0, cap: [40, 70, 110], def: 1.0, radius: 26,
       desc: '普通城池，稳定产兵。' },
     barracks: { label: '戟', name: '兵营', prod: 0.9, cap: [40, 70, 110], def: 1.0, radius: 26, atk: 1.5,
@@ -67,9 +67,22 @@
 
   // ---------- 行军 ----------
   YG.UNIT_SPEED = 62; // 像素 / 秒
-  YG.EMIT_INTERVAL = 0.09; // 出兵流发兵间隔
-  YG.PACKET_MAX = 12; // 每条出兵流最多拆成几个小队
+  YG.EMIT_INTERVAL = 0.09; // 一次性出兵（进贡）的发兵间隔
+  YG.PACKET_MAX = 12; // 一次性出兵最多拆成几个小队
   YG.COLLIDE_DIST = 11;
+
+  // ---------- 连线 ----------
+  // 城池之间有道路才能连线；连线后源源不断出兵，直到断线
+  // 每秒沿一条连线的出兵数 = (等级基础 + 城内兵力 × 系数) × 后期加速，城里兵越多推得越猛
+  YG.LINK_RATE = [2.5, 3.5, 4.5];
+  YG.LINK_RATE_PER_TROOP = 0.04;
+  YG.LINK_RATE_MAX = 12;
+  YG.LINK_PACKETS_PER_SEC = 5; // 每条连线每秒最多出几个小队（流量大时每队人数变多）
+  YG.LINK_SLOTS = [1, 2, 3]; // 各等级最多同时连几条线（主城 +1）
+  YG.ROAD_MAX_LEN = 215; // 道路最长距离（保证连通时可以更长）
+  YG.ROAD_MAX_DEGREE = 4;
+  YG.LINK_OFFSET = 4; // 连线和行军队伍靠道路一侧，双向连线不会重叠
+  YG.CAPITAL_GUARD = 0.3; // 主城连线出兵时至少留守上限三成的兵力
 
   // ---------- 节奏 ----------
   YG.OPENING_SHIELD = 60; // 开局主城免战时间（秒）
@@ -77,11 +90,11 @@
   YG.HAND_MAX = 3;
   YG.HAND_MAX_REWARD = 4; // 击杀反贼奖励可以超出手牌上限
   // 游戏拖得太久时，阴兵暴动：全场产兵加速
-  // 拖到后期城防逐渐崩坏，保证对局能结束
+  // 拖到后期出兵加速、城防逐渐崩坏，保证对局能结束
   YG.SURGE = [
-    { t: 360, mult: 1.5, def: 1, text: '阴兵暴动！全场产兵 ×1.5' },
-    { t: 540, mult: 2, def: 0.7, text: '地府大乱！城防 ×0.7' },
-    { t: 720, mult: 2, def: 0.45, text: '城墙崩坏！城防 ×0.45' }
+    { t: 360, flow: 1.5, def: 1, text: '阴兵暴动！连线出兵 ×1.5' },
+    { t: 540, flow: 1.5, def: 0.7, text: '地府大乱！城防 ×0.7' },
+    { t: 720, flow: 2, def: 0.45, text: '城墙崩坏！出兵 ×2 城防 ×0.45' }
   ];
 
   // ---------- 锦囊 ----------
@@ -99,8 +112,8 @@
   YG.REP_MAX = 100;
 
   YG.DIFFICULTY = {
-    easy: { name: '简单', think: 3.2, jitter: 1.6, greed: 0.55, cards: 0.5 },
-    normal: { name: '普通', think: 2.0, jitter: 1.0, greed: 0.8, cards: 0.85 },
-    hard: { name: '困难', think: 1.2, jitter: 0.6, greed: 1.0, cards: 1.0 }
+    easy: { name: '简单', think: 3.2, jitter: 1.6, greed: 0.55, cards: 0.5, attacks: 1 },
+    normal: { name: '普通', think: 2.0, jitter: 1.0, greed: 0.8, cards: 0.85, attacks: 2 },
+    hard: { name: '困难', think: 1.2, jitter: 0.6, greed: 1.0, cards: 1.0, attacks: 3 }
   };
 })(typeof GameGlobal !== 'undefined' ? GameGlobal : typeof window !== 'undefined' ? window : globalThis);

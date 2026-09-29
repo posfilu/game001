@@ -66,29 +66,143 @@ test('身份：可以指定玩家的身份', function () {
   });
 });
 
-test('出兵：兵力立即扣除，部队行军后攻占中立城池', function () {
-  var w = makeWorld(5, 3);
-  var me = w.players[0];
-  var cap = w.cities[me.capitalId];
-  var target = w.cities.filter(function (c) { return c.owner < 0; }).sort(function (a, b) {
-    return YG.dist(a.x, a.y, cap.x, cap.y) - YG.dist(b.x, b.y, cap.x, cap.y);
-  })[0];
-  target.troops = 5;
-  cap.troops = 60;
-  var sent = w.dispatch(0, [cap.id], target.id, 0.5);
-  assert.equal(sent, 30);
-  assert.equal(Math.round(cap.troops), 30);
-  for (var t = 0; t < 30 && (w.streams.length || w.packets.length); t += 0.05) w.step(0.05);
-  assert.equal(target.owner, 0);
-  // 30 兵攻 5 兵（城防 1），先头部队破城，后续部队入城驻守，约 25 兵（外加几秒产兵）
-  assert.ok(target.troops > 24 && target.troops < 30, 'garrison ' + target.troops);
-  assert.ok(w.events.some(function (e) { return e.type === 'capture' && e.city === target.id; }));
+function neighbor(w, cityId, pred) {
+  return w.adj[cityId].map(function (id) { return w.cities[id]; }).filter(pred || function () { return true; })[0];
+}
+
+function runUntil(w, cond, maxSeconds) {
+  for (var t = 0; t < (maxSeconds || 60) && !cond(); t += 0.05) w.step(0.05);
+}
+
+test('道路：所有城池连通，道路互不交叉，主城之间不直接相连', function () {
+  [5, 6, 8].forEach(function (n) {
+    for (var seed = 0; seed < 30; seed++) {
+      var w = makeWorld(n, seed);
+      var seen = {};
+      var queue = [0];
+      seen[0] = true;
+      while (queue.length) {
+        var c = queue.pop();
+        w.adj[c].forEach(function (x) {
+          if (!seen[x]) {
+            seen[x] = true;
+            queue.push(x);
+          }
+        });
+      }
+      assert.equal(Object.keys(seen).length, w.cities.length, n + 'p seed ' + seed + ' disconnected');
+      for (var i = 0; i < w.roads.length; i++) {
+        var a = w.cities[w.roads[i][0]];
+        var b = w.cities[w.roads[i][1]];
+        assert.ok(!(a.kind === 'capital' && b.kind === 'capital'));
+        for (var k = i + 1; k < w.roads.length; k++) {
+          var r = w.roads[k];
+          if (r.indexOf(a.id) >= 0 || r.indexOf(b.id) >= 0) continue;
+          var c1 = w.cities[r[0]];
+          var c2 = w.cities[r[1]];
+          assert.ok(!YG.segmentsCross(a.x, a.y, b.x, b.y, c1.x, c1.y, c2.x, c2.y), 'roads cross');
+        }
+      }
+    }
+  });
 });
 
-test('出兵：不能从别人的城池出兵', function () {
+test('连线：只能连有道路相连的城池，连线后持续出兵并攻占', function () {
+  var w = makeWorld(5, 3);
+  var cap = w.cities[w.players[0].capitalId];
+  var far = w.cities.find(function (c) { return c.id !== cap.id && !w.isAdjacent(cap.id, c.id); });
+  assert.equal(w.link(0, cap.id, far.id), 'noroad');
+  var target = neighbor(w, cap.id, function (c) { return c.owner < 0; });
+  target.troops = 10;
+  cap.troops = 60;
+  assert.equal(w.link(0, cap.id, target.id), 'linked');
+  assert.equal(w.link(0, cap.id, target.id), 'exists');
+  w.step(1);
+  assert.ok(cap.troops < 60, '源城池持续出兵');
+  runUntil(w, function () { return target.owner === 0; }, 30);
+  assert.equal(target.owner, 0);
+  // 攻下后连线保留，变成向新城池输送兵力
+  assert.ok(w.findLink(cap.id, target.id));
+  var t0 = target.troops;
+  run(w, 3);
+  assert.ok(target.troops > t0, '继续输送兵力');
+});
+
+test('连线：流量随城内兵力增加，兵少时等产兵', function () {
+  var w = makeWorld(5, 3);
+  var cap = w.cities[w.players[0].capitalId];
+  cap.troops = 10;
+  var small = w.linkRate(cap);
+  cap.troops = 100;
+  assert.ok(w.linkRate(cap) > small);
+  assert.ok(w.linkRate(cap) <= YG.LINK_RATE_MAX);
+  var target = neighbor(w, cap.id);
+  cap.troops = 0;
+  w.link(0, cap.id, target.id);
+  run(w, 5);
+  assert.ok(cap.troops >= 0, '兵力不会被扣成负数');
+});
+
+test('连线：主城出兵至少留守三成兵力', function () {
+  var w = makeWorld(5, 3);
+  var cap = w.cities[w.players[0].capitalId];
+  var target = neighbor(w, cap.id, function (c) { return c.owner < 0; });
+  target.troops = 500;
+  cap.troops = 60;
+  w.link(0, cap.id, target.id);
+  run(w, 40);
+  assert.ok(cap.troops >= w.cityCap(cap) * YG.CAPITAL_GUARD - 1e-9, 'capital kept ' + cap.troops);
+  assert.ok(target.troops < 500, '仍在持续进攻');
+});
+
+test('连线：不能从别人的城池或向免战的主城连线', function () {
   var w = makeWorld(5, 3);
   var other = w.cities[w.players[1].capitalId];
-  assert.equal(w.dispatch(0, [other.id], w.players[0].capitalId, 1), 0);
+  var nb = neighbor(w, other.id);
+  assert.equal(w.link(0, other.id, nb.id), 'invalid');
+  nb.owner = 0;
+  assert.equal(w.link(0, nb.id, other.id), 'shield');
+  other.shieldT = 0;
+  assert.equal(w.link(0, nb.id, other.id), 'linked');
+});
+
+test('连线：超出连线上限时替换最早的一条；可以断开', function () {
+  var w = makeWorld(6, 9);
+  var c = w.cities.find(function (x) { return x.kind === 'city' && !x.center && w.adj[x.id].length >= 3; });
+  c.owner = 0;
+  c.level = 1;
+  var nb = w.adj[c.id];
+  w.cities[nb[0]].shieldT = 0;
+  w.cities[nb[1]].shieldT = 0;
+  assert.equal(w.maxLinks(c), 1);
+  w.link(0, c.id, nb[0]);
+  w.link(0, c.id, nb[1]);
+  assert.equal(w.linksFrom(c.id).length, 1);
+  assert.equal(w.linksFrom(c.id)[0].to, nb[1]);
+  assert.equal(w.toggleLink(0, c.id, nb[1]), 'unlinked');
+  assert.equal(w.linksFrom(c.id).length, 0);
+  c.level = 3;
+  assert.equal(w.maxLinks(c), 3);
+  w.link(0, c.id, nb[0]);
+  w.link(0, c.id, nb[1]);
+  assert.equal(w.cutLinks(0, c.id), 2);
+});
+
+test('连线：源城池失守连线消失；目标被第三方攻下时自动断开', function () {
+  var w = makeWorld(6, 12);
+  var cap = w.cities[w.players[0].capitalId];
+  var mid = neighbor(w, cap.id, function (c) { return c.owner < 0; });
+  w.link(0, cap.id, mid.id);
+  w.capture(mid, 1, 5);
+  assert.equal(w.findLink(cap.id, mid.id), null, '目标换了主人，连线自动断开');
+
+  var src = neighbor(w, cap.id, function (c) { return c.owner < 0; }) || mid;
+  src.owner = 0;
+  var tgt = neighbor(w, src.id, function (c) { return c.id !== cap.id; });
+  tgt.shieldT = 0;
+  w.link(0, src.id, tgt.id);
+  w.capture(src, 2, 5);
+  assert.equal(w.findLink(src.id, tgt.id), null, '源城池失守，连线失效');
 });
 
 test('兵种：兵营出重戟兵（攻击 ×1.5），马场出骑兵（更快）', function () {
@@ -99,10 +213,13 @@ test('兵种：兵营出重戟兵（攻击 ×1.5），马场出骑兵（更快�
   s.owner = 0;
   b.troops = 40;
   s.troops = 40;
-  var tgt = w.cities.find(function (c) { return c.owner < 0 && c !== b && c !== s && c.kind === 'city'; });
-  w.dispatch(0, [b.id], tgt.id, 1);
-  w.dispatch(0, [s.id], tgt.id, 1);
-  w.step(0.2);
+  var tb = neighbor(w, b.id);
+  var ts = neighbor(w, s.id);
+  tb.shieldT = 0;
+  ts.shieldT = 0;
+  assert.equal(w.link(0, b.id, tb.id), 'linked');
+  assert.equal(w.link(0, s.id, ts.id), 'linked');
+  w.step(0.3);
   var heavy = w.packets.filter(function (p) { return p.heavy; });
   var cav = w.packets.filter(function (p) { return p.cavalry; });
   assert.ok(heavy.length > 0 && heavy[0].atk === 1.5);
@@ -299,30 +416,38 @@ test('摸牌：定时获得锦囊且不超过手牌上限', function () {
   assert.equal(p.hand.length, YG.HAND_MAX);
 });
 
-test('后期：阴兵暴动提高产兵、降低城防', function () {
+test('后期：阴兵暴动加快连线出兵、降低城防', function () {
   var w = makeWorld(5, 14);
   var cap = w.cities[w.players[0].capitalId];
   var def0 = w.cityDef(cap);
   run(w, YG.SURGE[YG.SURGE.length - 1].t + 1);
-  assert.ok(w.prodMult > 1);
+  assert.ok(w.flowMult > 1);
   assert.ok(w.cityDef(cap) < def0);
 });
 
-test('进贡：援军进入主公城池，进贡者名声变为疑忠', function () {
+/** 找一座与主公城池相邻的城池交给 giver，返回 [源城池, 主公城池] */
+function besideLord(w, giver) {
+  var lordCity = w.cities[w.players[w.lordId].capitalId];
+  var src = neighbor(w, lordCity.id);
+  src.owner = giver.id;
+  src.troops = 60;
+  return [src, lordCity];
+}
+
+test('进贡：援军沿道路进入相邻的主公城池，进贡者名声变为疑忠', function () {
   var w = makeWorld(6, 31);
   var giver = w.players.find(function (p) { return p.role !== R.LORD; });
-  var from = w.cities[giver.capitalId];
-  var lordCap = w.cities[w.players[w.lordId].capitalId];
-  from.troops = 60;
+  var pair = besideLord(w, giver);
+  var lordCap = pair[1];
   var before = lordCap.troops;
-  assert.ok(w.tribute(giver.id, from.id, lordCap.id, 0.5) > 0);
-  for (var t = 0; t < 60 && (w.streams.length || w.packets.length); t += 0.05) w.step(0.05);
+  assert.ok(w.tribute(giver.id, pair[0].id, lordCap.id, 0.5) > 0);
+  runUntil(w, function () { return !w.streams.length && !w.packets.length; }, 60);
   assert.equal(lordCap.owner, w.lordId);
   assert.ok(lordCap.troops > before + 20, 'lord capital reinforced: ' + before + ' -> ' + lordCap.troops);
   assert.equal(w.repTag(giver.id), '疑忠');
 });
 
-test('进贡：只能进贡给主公，主公自己不能进贡', function () {
+test('进贡：只能进贡给相邻的主公城池，主公自己不能进贡', function () {
   var w = makeWorld(6, 32);
   var a = w.players.find(function (p) { return p.role !== R.LORD; });
   var b = w.players.find(function (p) { return p.role !== R.LORD && p.id !== a.id; });
@@ -330,6 +455,11 @@ test('进贡：只能进贡给主公，主公自己不能进贡', function () {
   assert.equal(w.tribute(a.id, a.capitalId, b.capitalId, 0.5), 0);
   var lord = w.players[w.lordId];
   assert.equal(w.tribute(lord.id, lord.capitalId, a.capitalId, 0.5), 0);
+  var lordCity = w.cities[lord.capitalId];
+  var far = w.cities.find(function (c) { return c.owner < 0 && !w.isAdjacent(c.id, lordCity.id); });
+  far.owner = a.id;
+  far.troops = 50;
+  assert.equal(w.tribute(a.id, far.id, lordCity.id, 0.5), 0, '没有道路不能进贡');
 });
 
 test('进贡：主公的箭塔和部队不会拦截援军', function () {
